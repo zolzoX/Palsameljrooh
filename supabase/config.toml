@@ -1,0 +1,37 @@
+project_id = "crypto-command"
+
+[functions.meme-radar]
+verify_jwt = false
+entrypoint = "./functions/meme-radar/index.ts"
+
+[functions.news-desk]
+verify_jwt = false
+entrypoint = "./functions/news-desk/index.ts"
+
+[functions.telegram-send]
+verify_jwt = false
+entrypoint = "./functions/telegram-send/index.ts"
+
+[functions.crypto-live]
+verify_jwt = false
+entrypoint = "./functions/crypto-live/index.ts"
+
+[functions.whale-tracker]
+verify_jwt = false
+entrypoint = "./functions/whale-tracker/index.ts"
+
+[functions.signal-engine]
+verify_jwt = false
+entrypoint = "./functions/signal-engine/index.ts"
+
+[functions.telegram-scraper]
+verify_jwt = false
+entrypoint = "./functions/telegram-scraper/index.ts"
+
+[functions.telegram-inviter]
+verify_jwt = false
+entrypoint = "./functions/telegram-inviter/index.ts"
+
+[functions.vip-bot]
+verify_jwt = false
+entrypoint = "./functions/vip-bot/index.ts"

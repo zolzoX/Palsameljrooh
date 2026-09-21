@@ -337,7 +337,7 @@ Deno.serve(async (req: Request) => {
       source_url: string; pair: string | null; sentiment: string | null;
       timeframe: string; indicators: string[]; signalType: string;
       price: number; priceChange: number; confidence: number;
-      is_vip: boolean; entry_price: number | null; tp1_price: number | null;
+      is_vip: boolean; entitlement: 'free' | 'vip'; entry_price: number | null; tp1_price: number | null;
       tp2_price: number | null; tp3_price: number | null; stop_loss_price: number | null;
     }> = [];
 
@@ -518,7 +518,7 @@ Deno.serve(async (req: Request) => {
               source_url: `https://www.binance.com/en/trade/${pair.symbol}`,
               pair: `${pair.baseAsset}/USDT`, sentiment, timeframe,
               indicators: triggered, signalType: "signal", price, priceChange: change, confidence,
-              is_vip: false, entry_price: levels.entry, tp1_price: levels.tp1,
+              is_vip: false, entitlement: 'free', entry_price: levels.entry, tp1_price: levels.tp1,
               tp2_price: levels.tp2, tp3_price: levels.tp3, stop_loss_price: levels.stopLoss,
             });
             freeSignalsGenerated++;
@@ -567,7 +567,8 @@ Deno.serve(async (req: Request) => {
           else { triggered.push("VWAP"); if (sentiment === "bearish") agreeCount++; }
 
           // VIP requires 5+ of 7 indicators agreeing in the same direction
-          if (agreeCount >= 5 && sentiment !== "neutral") {
+          const vipThreshold = cfg.scaler_vip_threshold ?? 5;
+          if (agreeCount >= vipThreshold && sentiment !== "neutral") {
             const confidence = Math.min(100, Math.round((agreeCount / 7) * 100));
             const tradeType = futuresPairs.has(pair.symbol) ? "FUTURES" : "SPOT";
             const levels = computeTradeLevels(price, sentiment, rsi, bb, atr);
@@ -580,7 +581,7 @@ Deno.serve(async (req: Request) => {
               source_url: `https://www.binance.com/en/trade/${pair.symbol}`,
               pair: `${pair.baseAsset}/USDT`, sentiment, timeframe,
               indicators: triggered, signalType: "signal", price, priceChange: change, confidence,
-              is_vip: true, entry_price: levels.entry, tp1_price: levels.tp1,
+              is_vip: true, entitlement: 'vip', entry_price: levels.entry, tp1_price: levels.tp1,
               tp2_price: levels.tp2, tp3_price: levels.tp3, stop_loss_price: levels.stopLoss,
             });
             vipSignalsGenerated++;
@@ -699,6 +700,7 @@ Deno.serve(async (req: Request) => {
                 status: "pending", source_url: "https://www.binance.com", pair: wp.asset,
                 sentiment: direction === "out" ? "bearish" : "bullish", timeframe: "1h",
                 indicators: ["WHALE"], signalType: "whale", price: 0, priceChange: 0, confidence: 85,
+                is_vip: false, entitlement: "free",
               });
             }
           }
@@ -723,7 +725,8 @@ Deno.serve(async (req: Request) => {
     }
     } // end if (whaleBtcAvailable)
 
-    // 7. Run meme radar and generate meme signals
+    // 7. Run meme radar and generate meme signals with counter-based entitlement
+    // Rule: signals 1-3 = free, 4+ = vip (persistent, atomic, race-safe)
     try {
       const memeResp = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/meme-radar`, {
         method: "POST",
@@ -739,16 +742,69 @@ Deno.serve(async (req: Request) => {
             if (recentTitles.has(mTitle)) continue;
             const change24h = token.priceChange24h as number ?? 0;
             const change1h = token.priceChange1h as number ?? 0;
+            const change5m = token.priceChange5m as number ?? 0;
+            const change6h = token.priceChange6h as number ?? 0;
             const caution = token.caution as string ?? "";
             const source = token.source as string ?? "DexScreener";
             const sentiment = momentum === "strong-bullish" || momentum === "surging" ? "bullish" : "bearish";
+            const riskLevel = token.riskLevel as string ?? "medium";
+            const liquidity = token.liquidity as number ?? 0;
+            const volume24h = token.volume24h as number ?? 0;
+            const volume1h = token.volume1h as number ?? 0;
+            const fdv = token.fdv as number ?? 0;
+            const marketCap = token.marketCap as number ?? 0;
+            const buys1h = token.txnsBuys1h as number ?? 0;
+            const sells1h = token.txnsSells1h as number ?? 0;
+            const buys24h = token.txnsBuys24h as number ?? 0;
+            const sells24h = token.txnsSells24h as number ?? 0;
+            const smartMoneyFlow = token.smartMoneyFlow as string ?? "Neutral";
+            const holderConcentration = token.holderConcentration as string ?? "Insufficient data";
+            const liquidityHealth = token.liquidityHealth as string ?? "Stable";
+            const vipIndicators = token.vipIndicators as string[] ?? [];
+            const chain = token.chain as string ?? "unknown";
+
+            // Atomically increment the persistent meme counter
+            const { data: counterResult } = await supabase.rpc("increment_meme_counter");
+            const counterData = (counterResult ?? []) as Array<{ seq_number: number; entitlement: string }>;
+            const seqNum = counterData[0]?.seq_number ?? 1;
+            const memeEntitlement = (counterData[0]?.entitlement ?? "free") as "free" | "vip";
+            const isVipMeme = memeEntitlement === "vip";
+
+            // Build FREE meme message (basic)
+            const freeMsg = `${symbol} ${momentum} on ${source}. 1h: ${change1h >= 0 ? "+" : ""}${change1h.toFixed(1)}%, 24h: ${change24h >= 0 ? "+" : ""}${change24h.toFixed(1)}%. ${caution ? "CAUTION: " + caution : ""}`;
+
+            // Build VIP meme message (expanded analysis with real data)
+            const fmtUsd = (v: number): string => v >= 1e6 ? "$" + (v / 1e6).toFixed(2) + "M" : v >= 1e3 ? "$" + (v / 1e3).toFixed(1) + "K" : "$" + v.toFixed(0);
+            const buySellRatio1h = (buys1h + sells1h) > 0 ? ((buys1h / (buys1h + sells1h)) * 100).toFixed(0) + "%" : "N/A";
+            const buySellRatio24h = (buys24h + sells24h) > 0 ? ((buys24h / (buys24h + sells24h)) * 100).toFixed(0) + "%" : "N/A";
+            const volLiqRatio = liquidity > 0 ? (volume24h / liquidity).toFixed(1) : "N/A";
+
+            const vipMsg = `<b>VIP MEME SIGNAL #${seqNum}</b>\n`
+              + `#${symbol} ${momentum === "strong-bullish" || momentum === "surging" ? "PUMP" : "DUMP"} on ${source} (${chain})\n\n`
+              + `<b>Price Action</b>\n`
+              + `5m: ${change5m >= 0 ? "+" : ""}${change5m.toFixed(1)}% | 1h: ${change1h >= 0 ? "+" : ""}${change1h.toFixed(1)}% | 6h: ${change6h >= 0 ? "+" : ""}${change6h.toFixed(1)}% | 24h: ${change24h >= 0 ? "+" : ""}${change24h.toFixed(1)}%\n\n`
+              + `<b>Liquidity & Volume</b>\n`
+              + `Liquidity: ${fmtUsd(liquidity)} | Vol 24h: ${fmtUsd(volume24h)} | Vol 1h: ${fmtUsd(volume1h)}\n`
+              + `Vol/Liq Ratio: ${volLiqRatio} | FDV: ${fmtUsd(fdv)} | MCap: ${fmtUsd(marketCap)}\n\n`
+              + `<b>Buy/Sell Activity</b>\n`
+              + `1h: ${buys1h} buys / ${sells1h} sells (${buySellRatio1h} buy)\n`
+              + `24h: ${buys24h} buys / ${sells24h} sells (${buySellRatio24h} buy)\n\n`
+              + `<b>Smart Money Flow</b>\n${smartMoneyFlow}\n`
+              + `<b>Holder Concentration</b>\n${holderConcentration}\n`
+              + `<b>Liquidity Health</b>\n${liquidityHealth}\n\n`
+              + `<b>Risk Level</b>: ${riskLevel.toUpperCase()}\n`
+              + (caution ? `<b>Caution</b>: ${caution}\n` : "")
+              + (vipIndicators.length > 0 ? `\n<b>VIP Indicators</b>\n${vipIndicators.map((i) => "\u{2022} " + i).join("\n")}` : "");
+
             newSignals.push({
               engine_slug: "meme", title: mTitle,
-              message: `${symbol} ${momentum} on ${source}. 1h: ${change1h >= 0 ? "+" : ""}${change1h.toFixed(1)}%, 24h: ${change24h >= 0 ? "+" : ""}${change24h.toFixed(1)}%. ${caution ? "CAUTION: " + caution : ""}`,
+              message: isVipMeme ? vipMsg : freeMsg,
               status: "pending",
               source_url: (token.dexUrl as string) ?? `https://dexscreener.com`,
               pair: symbol, sentiment, timeframe: "1h",
-              indicators: ["MEME"], signalType: "meme", price: 0, priceChange: change24h, confidence: 80,
+              indicators: isVipMeme ? ["MEME", ...vipIndicators] : ["MEME"],
+              signalType: "meme", price: 0, priceChange: change24h, confidence: 80,
+              is_vip: isVipMeme, entitlement: memeEntitlement,
             });
           }
         }
@@ -811,6 +867,7 @@ Deno.serve(async (req: Request) => {
           source_url: `https://www.binance.com/en/trade/${binanceSym}`,
           pair: sp.symbol, sentiment, timeframe,
           indicators: triggered, signalType: "stock", price: stockPrice, priceChange: stockChange, confidence: sConfidence,
+          is_vip: false, entitlement: "free",
         });
       } catch { /* skip stock */ }
     }
@@ -838,6 +895,7 @@ Deno.serve(async (req: Request) => {
             message: `${title}\nSource: ${source}\nKeywords: ${keywords.slice(0, 5).map((k) => "#" + k).join(" ")}`,
             status: "pending", source_url: url, pair: null, sentiment, timeframe: "1h",
             indicators: ["NEWS"], signalType: "news", price: 0, priceChange: 0, confidence: 70,
+            is_vip: false, entitlement: "free",
           });
         }
       }
@@ -871,6 +929,7 @@ Deno.serve(async (req: Request) => {
       status: "pending", source_url: s.source_url, pair: s.pair,
       sentiment: s.sentiment, timeframe: s.timeframe, indicators: s.indicators,
       is_vip: (s as Record<string, unknown>).is_vip ?? false,
+      entitlement: (s as Record<string, unknown>).entitlement ?? "free",
       entry_price: (s as Record<string, unknown>).entry_price ?? null,
       tp1_price: (s as Record<string, unknown>).tp1_price ?? null,
       tp2_price: (s as Record<string, unknown>).tp2_price ?? null,
@@ -1127,13 +1186,14 @@ Deno.serve(async (req: Request) => {
     for (const sig of inserted ?? []) {
       const original = signalsToSend.find((s) => s.title === sig.title);
       const isVipSignal = (original as Record<string, unknown> | undefined)?.is_vip === true;
+      const signalEntitlement = ((sig as Record<string, unknown>).entitlement as string) ?? (isVipSignal ? "vip" : "free");
 
-      // Determine target bots: admin config (bot_engine_routes) + entitlement (is_vip) → channel type
+      // Determine target bots: admin config (bot_engine_routes) + entitlement → channel type
       const allowedBotIds = routes.filter((r) => r.engine_slug === sig.engine_slug).map((r) => r.bot_id);
       const targetBots = bots.filter((b) => {
         if (!allowedBotIds.includes(b.id)) return false;
-        // VIP signals go to VIP channels; FREE signals go to FREE channels
-        if (isVipSignal) return b.channel_type === "vip";
+        // FREE entitlement → FREE channel; VIP entitlement → VIP channel
+        if (signalEntitlement === "vip") return b.channel_type === "vip";
         return b.channel_type === "free";
       });
 
@@ -1146,8 +1206,9 @@ Deno.serve(async (req: Request) => {
       const deliveryRows = targetBots.map((b) => ({
         signal_id: sig.id,
         bot_id: b.id,
-        channel_type: ((b as Record<string, unknown>).channel_type as string) ?? "vip",
+        channel_type: b.channel_type,
         channel_id: b.chat_id,
+        entitlement: signalEntitlement,
         status: "pending",
       }));
       await supabase.from("signal_deliveries").insert(deliveryRows);

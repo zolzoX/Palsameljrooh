@@ -411,7 +411,7 @@ Deno.serve(async (req: Request) => {
       let msg = `<b>VIP SIGNAL</b>\n`;
       msg += `#${pairStr} - ${dirLabel} ${dirEmoji}\n`;
       msg += `Type: ${tradeType === "FUTURES" ? "FUTURES" : "SPOT"}\n`;
-      msg += `Agreement: ${agreeCount}/7 indicators\n\n`;
+      msg += `Agreement: ${agreeCount}/5 indicators\n\n`;
 
       msg += `<b>Trade Levels</b>\n`;
       msg += `Entry: ${fmtPrice(levels.entry)}\n`;
@@ -424,16 +424,31 @@ Deno.serve(async (req: Request) => {
         msg += `Leverage: x${lev}\n`;
       }
 
-      msg += `\n<b>Technical Indicators (7)</b>\n`;
+      msg += `\n<b>Technical Indicators (5)</b>\n`;
       msg += `RSI: ${rsi.toFixed(1)}${mark("RSI")}\n`;
       msg += `EMA: Fast ${fmtPrice(vipInd.emaFast)} / Slow ${fmtPrice(vipInd.emaSlow)}${mark("EMA")}\n`;
       msg += `MACD: Hist ${vipInd.macd.macdHistogram >= 0 ? "+" : ""}${vipInd.macd.macdHistogram.toFixed(4)}${mark("MACD")}\n`;
       msg += `BB: L ${fmtPrice(bb.lower)} / M ${fmtPrice(bb.middle)} / U ${fmtPrice(bb.upper)}${mark("BB")}\n`;
-      msg += `Stoch: K ${vipInd.stoch.k.toFixed(1)} / D ${vipInd.stoch.d.toFixed(1)}${mark("STOCH")}\n`;
       msg += `ADX: ${vipInd.adx.adx.toFixed(1)} (+DI ${vipInd.adx.plusDI.toFixed(1)} / -DI ${vipInd.adx.minusDI.toFixed(1)})${mark("ADX")}\n`;
-      msg += `VWAP: ${fmtPrice(vipInd.vwap)}${mark("VWAP")}\n`;
 
       msg += `\n24h: ${change >= 0 ? "+" : ""}${change.toFixed(2)}% | TF: ${timeframe}`;
+      return msg;
+    }
+
+    // Build a locked/teaser caption for VIP signals shown on FREE channel
+    function buildLockedCaption(sig: { engine_slug: string; title: string; pair: string | null; sentiment: string | null }): string {
+      const pairStr = sig.pair ?? "";
+      const isBull = sig.sentiment === "bullish";
+      const dirEmoji = isBull ? "\u{1F7E2}" : sig.sentiment === "bearish" ? "\u{1F534}" : "\u{26AA}";
+      const dirLabel = isBull ? "Long" : sig.sentiment === "bearish" ? "Short" : "Neutral";
+      let msg = `\u{1F512} <b>VIP SIGNAL — LOCKED</b>\n`;
+      msg += `#${pairStr} - ${dirLabel} ${dirEmoji}\n\n`;
+      msg += `This premium signal is available to VIP members only.\n`;
+      msg += `Upgrade to VIP to unlock:\n`;
+      msg += `\u{2022} Entry, Stop Loss & 3 Take Profit targets\n`;
+      msg += `\u{2022} 5 technical indicators (RSI, EMA, MACD, BB, ADX)\n`;
+      msg += `\u{2022} Optimal leverage recommendations\n\n`;
+      msg += `Tap the button below to unlock this signal \u{2B07}\u{FE0F}`;
       return msg;
     }
 
@@ -539,7 +554,8 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        // --- VIP signal: 4+ of 7 advanced indicators must agree (configurable via scalper_vip_threshold) ---
+        // --- VIP signal: 3+ of 5 quality indicators must agree (configurable via scalper_vip_threshold) ---
+        // VIP uses 5 stronger indicators: RSI, EMA, MACD, BB, ADX (fewer but better than FREE's 4)
         if (vipRemaining - vipSignalsGenerated > 0) {
           const triggered: string[] = [];
           let sentiment = "neutral";
@@ -561,13 +577,7 @@ Deno.serve(async (req: Request) => {
           if (price <= bb.lower) { triggered.push("BB"); if (sentiment === "bullish") agreeCount++; }
           else if (price >= bb.upper) { triggered.push("BB"); if (sentiment === "bearish") agreeCount++; }
 
-          // Stochastic
-          const stochOversold = (cfg.stoch_oversold ?? 20);
-          const stochOverbought = (cfg.stoch_overbought ?? 80);
-          if (stoch.k <= stochOversold) { triggered.push("STOCH"); if (sentiment === "bullish") agreeCount++; }
-          else if (stoch.k >= stochOverbought) { triggered.push("STOCH"); if (sentiment === "bearish") agreeCount++; }
-
-          // ADX (trend strength)
+          // ADX (trend strength — quality filter, not in FREE)
           const adxThreshold = (cfg.adx_threshold ?? 25);
           if (adx.adx >= adxThreshold) {
             triggered.push("ADX");
@@ -576,14 +586,10 @@ Deno.serve(async (req: Request) => {
             else if (!adxBull && sentiment === "bearish") agreeCount++;
           }
 
-          // VWAP
-          if (price > vwap) { triggered.push("VWAP"); if (sentiment === "bullish") agreeCount++; }
-          else { triggered.push("VWAP"); if (sentiment === "bearish") agreeCount++; }
-
-          // VIP requires scalper_vip_threshold+ of 7 indicators agreeing in the same direction
-          const vipThreshold = cfg.scaler_vip_threshold ?? 5;
+          // VIP requires scalper_vip_threshold+ of 5 indicators agreeing in the same direction
+          const vipThreshold = cfg.scaler_vip_threshold ?? 3;
           if (agreeCount >= vipThreshold && sentiment !== "neutral") {
-            const confidence = Math.min(100, Math.round((agreeCount / 7) * 100));
+            const confidence = Math.min(100, Math.round((agreeCount / 5) * 100));
             const tradeType = futuresPairs.has(pair.symbol) ? "FUTURES" : "SPOT";
             const levels = computeTradeLevels(price, sentiment, rsi, bb, atr);
             const dirLabel = sentiment === "bullish" ? "LONG" : "SHORT";
@@ -1203,11 +1209,12 @@ Deno.serve(async (req: Request) => {
       const signalEntitlement = ((sig as Record<string, unknown>).entitlement as string) ?? (isVipSignal ? "vip" : "free");
 
       // Determine target bots: admin config (bot_engine_routes) + entitlement → channel type
+      // VIP signals go to BOTH VIP (full content) and FREE (locked teaser)
       const allowedBotIds = routes.filter((r) => r.engine_slug === sig.engine_slug).map((r) => r.bot_id);
       const targetBots = bots.filter((b) => {
         if (!allowedBotIds.includes(b.id)) return false;
-        // FREE entitlement → FREE channel; VIP entitlement → VIP channel
-        if (signalEntitlement === "vip") return b.channel_type === "vip";
+        // FREE entitlement → FREE channel only; VIP entitlement → BOTH channels
+        if (signalEntitlement === "vip") return true; // VIP goes to all allowed channels
         return b.channel_type === "free";
       });
 
@@ -1366,7 +1373,11 @@ Deno.serve(async (req: Request) => {
 
       for (const bot of targetBots) {
         const isFreeChannel = bot.channel_type === "free";
-        const caption = buildFullCaption();
+        const isVipOnFree = isFreeChannel && signalEntitlement === "vip";
+        // VIP signals on FREE channel get locked teaser; everything else gets full caption
+        const caption = isVipOnFree
+          ? buildLockedCaption({ engine_slug: sig.engine_slug, title: sig.title, pair: sig.pair as string | null, sentiment: sig.sentiment as string | null })
+          : buildFullCaption();
         let keyboard: Record<string, unknown>;
         if (isFreeChannel) {
           const subUrl = await resolveSubscribeUrl(bot as unknown as Record<string, unknown>);

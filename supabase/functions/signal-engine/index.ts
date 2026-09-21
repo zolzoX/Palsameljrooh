@@ -400,15 +400,19 @@ Deno.serve(async (req: Request) => {
       return msg;
     }
 
-    function buildVipSignalMessage(pair: { baseAsset: string; symbol: string }, tradeType: string, sentiment: string, rsi: number, macdBullish: boolean, bb: { upper: number; middle: number; lower: number }, price: number, change: number, confidence: number, levels: { entry: number; stopLoss: number; tp1: number; tp2: number; tp3: number }, timeframe: string, atr: number): string {
+    function buildVipSignalMessage(pair: { baseAsset: string; symbol: string }, tradeType: string, sentiment: string, rsi: number, macdBullish: boolean, bb: { upper: number; middle: number; lower: number }, price: number, change: number, confidence: number, levels: { entry: number; stopLoss: number; tp1: number; tp2: number; tp3: number }, timeframe: string, atr: number, vipInd: { emaFast: number; emaSlow: number; macd: { macd: number; signal: number; macdHistogram: number }; stoch: { k: number; d: number }; adx: { adx: number; plusDI: number; minusDI: number }; vwap: number; triggered: string[] }): string {
       const isBull = sentiment === "bullish";
       const dirEmoji = isBull ? "\u{1F7E2}" : "\u{1F534}";
       const dirLabel = isBull ? "Long" : "Short";
       const pairStr = `${pair.baseAsset}/USDT`;
+      const agreeCount = vipInd.triggered.length;
+      const mark = (name: string) => vipInd.triggered.includes(name) ? " \u{2705}" : " \u{274C}";
 
       let msg = `<b>VIP SIGNAL</b>\n`;
       msg += `#${pairStr} - ${dirLabel} ${dirEmoji}\n`;
-      msg += `Type: ${tradeType === "FUTURES" ? "FUTURES" : "SPOT"}\n\n`;
+      msg += `Type: ${tradeType === "FUTURES" ? "FUTURES" : "SPOT"}\n`;
+      msg += `Agreement: ${agreeCount}/7 indicators\n\n`;
+
       msg += `<b>Trade Levels</b>\n`;
       msg += `Entry: ${fmtPrice(levels.entry)}\n`;
       msg += `Stop Loss: ${fmtPrice(levels.stopLoss)}\n`;
@@ -419,6 +423,16 @@ Deno.serve(async (req: Request) => {
         const lev = computeLeverage(atr, price, rsi, confidence);
         msg += `Leverage: x${lev}\n`;
       }
+
+      msg += `\n<b>Technical Indicators (7)</b>\n`;
+      msg += `RSI: ${rsi.toFixed(1)}${mark("RSI")}\n`;
+      msg += `EMA: Fast ${fmtPrice(vipInd.emaFast)} / Slow ${fmtPrice(vipInd.emaSlow)}${mark("EMA")}\n`;
+      msg += `MACD: Hist ${vipInd.macd.macdHistogram >= 0 ? "+" : ""}${vipInd.macd.macdHistogram.toFixed(4)}${mark("MACD")}\n`;
+      msg += `BB: L ${fmtPrice(bb.lower)} / M ${fmtPrice(bb.middle)} / U ${fmtPrice(bb.upper)}${mark("BB")}\n`;
+      msg += `Stoch: K ${vipInd.stoch.k.toFixed(1)} / D ${vipInd.stoch.d.toFixed(1)}${mark("STOCH")}\n`;
+      msg += `ADX: ${vipInd.adx.adx.toFixed(1)} (+DI ${vipInd.adx.plusDI.toFixed(1)} / -DI ${vipInd.adx.minusDI.toFixed(1)})${mark("ADX")}\n`;
+      msg += `VWAP: ${fmtPrice(vipInd.vwap)}${mark("VWAP")}\n`;
+
       msg += `\n24h: ${change >= 0 ? "+" : ""}${change.toFixed(2)}% | TF: ${timeframe}`;
       return msg;
     }
@@ -525,7 +539,7 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        // --- VIP signal: 5 of 7 advanced indicators must agree (high-quality, achievable) ---
+        // --- VIP signal: 4+ of 7 advanced indicators must agree (configurable via scalper_vip_threshold) ---
         if (vipRemaining - vipSignalsGenerated > 0) {
           const triggered: string[] = [];
           let sentiment = "neutral";
@@ -566,7 +580,7 @@ Deno.serve(async (req: Request) => {
           if (price > vwap) { triggered.push("VWAP"); if (sentiment === "bullish") agreeCount++; }
           else { triggered.push("VWAP"); if (sentiment === "bearish") agreeCount++; }
 
-          // VIP requires 5+ of 7 indicators agreeing in the same direction
+          // VIP requires scalper_vip_threshold+ of 7 indicators agreeing in the same direction
           const vipThreshold = cfg.scaler_vip_threshold ?? 5;
           if (agreeCount >= vipThreshold && sentiment !== "neutral") {
             const confidence = Math.min(100, Math.round((agreeCount / 7) * 100));
@@ -575,7 +589,7 @@ Deno.serve(async (req: Request) => {
             const dirLabel = sentiment === "bullish" ? "LONG" : "SHORT";
             const title = `[VIP] [${tradeType}] ${pair.baseAsset} ${dirLabel} — ${confidence}% (${timeframe})`;
             if (recentTitles.has(title)) continue;
-            const message = buildVipSignalMessage(pair, tradeType, sentiment, rsi, macdBullish, bb, price, change, confidence, levels, timeframe, atr);
+            const message = buildVipSignalMessage(pair, tradeType, sentiment, rsi, macdBullish, bb, price, change, confidence, levels, timeframe, atr, { emaFast, emaSlow, macd, stoch, adx, vwap, triggered });
             newSignals.push({
               engine_slug: "scalping", title, message, status: "pending",
               source_url: `https://www.binance.com/en/trade/${pair.symbol}`,

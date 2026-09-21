@@ -256,7 +256,7 @@ Deno.serve(async (req: Request) => {
     // 2. Fetch all active bots and their engine routes
     const { data: botData } = await supabase.from("telegram_bots").select("*").eq("is_active", true).eq("is_connected", true);
     const { data: routeData } = await supabase.from("bot_engine_routes").select("*").eq("is_allowed", true);
-    const bots = (botData ?? []) as Array<{ id: string; name: string; bot_token: string; chat_id: string }>;
+    const bots = (botData ?? []) as Array<{ id: string; name: string; bot_token: string; chat_id: string; channel_type: string }>
     const routes = (routeData ?? []) as Array<{ bot_id: string; engine_slug: string }>;
 
     if (bots.length === 0) {
@@ -1127,21 +1127,14 @@ Deno.serve(async (req: Request) => {
     for (const sig of inserted ?? []) {
       const original = signalsToSend.find((s) => s.title === sig.title);
       const isVipSignal = (original as Record<string, unknown> | undefined)?.is_vip === true;
-      const isNonScalping = sig.engine_slug === "whale" || sig.engine_slug === "meme" || sig.engine_slug === "news";
 
-      // Determine target bots based on engine type and VIP status
+      // Determine target bots: admin config (bot_engine_routes) + entitlement (is_vip) → channel type
       const allowedBotIds = routes.filter((r) => r.engine_slug === sig.engine_slug).map((r) => r.bot_id);
       const targetBots = bots.filter((b) => {
         if (!allowedBotIds.includes(b.id)) return false;
-        const botChannelType = (b as Record<string, unknown>).channel_type as string | undefined;
-        // Whale → FREE channel only (not VIP)
-        if (sig.engine_slug === "whale") return botChannelType === "free";
-        // VIP scalping → VIP channel only
-        if (sig.engine_slug === "scalping" && isVipSignal) return botChannelType !== "free";
-        // Free scalping → FREE channel only
-        if (sig.engine_slug === "scalping" && !isVipSignal) return botChannelType === "free";
-        // Meme and News → both channels for now (counter-based routing added in Phase 3)
-        return true;
+        // VIP signals go to VIP channels; FREE signals go to FREE channels
+        if (isVipSignal) return b.channel_type === "vip";
+        return b.channel_type === "free";
       });
 
       if (targetBots.length === 0) {
@@ -1297,12 +1290,11 @@ Deno.serve(async (req: Request) => {
       }
 
       for (const bot of targetBots) {
-        const botRecord = bot as Record<string, unknown>;
-        const isFreeChannel = botRecord.channel_type === "free";
+        const isFreeChannel = bot.channel_type === "free";
         const caption = buildFullCaption();
         let keyboard: Record<string, unknown>;
         if (isFreeChannel) {
-          const subUrl = await resolveSubscribeUrl(botRecord);
+          const subUrl = await resolveSubscribeUrl(bot as unknown as Record<string, unknown>);
           keyboard = buildFreeKeyboard(subUrl);
         } else {
           keyboard = buildVipKeyboard();

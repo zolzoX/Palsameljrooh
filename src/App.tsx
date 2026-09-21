@@ -102,14 +102,14 @@ export default function App() {
 
   if (!authed) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#0a0e17] px-4">
+      <div className="flex h-screen items-center justify-center bg-gradient-to-br from-[#1a0505] via-[#0a0e17] to-[#1a0505] px-4">
         <div className="w-full max-w-sm">
           <div className="mb-8 text-center">
-            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg shadow-emerald-500/20">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-red-600 to-rose-700 shadow-lg shadow-red-600/30 ring-1 ring-red-500/20">
               <Lock className="h-8 w-8 text-white" />
             </div>
             <h1 className="text-2xl font-bold text-white">Admin Access</h1>
-            <p className="mt-1 text-sm text-slate-400">Enter your passcode to access the control panel</p>
+            <p className="mt-1 text-sm text-red-300/70">Enter your passcode to access the control panel</p>
           </div>
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
@@ -119,7 +119,7 @@ export default function App() {
                 onChange={(e) => { setPasscode(e.target.value); setAuthError(false); }}
                 placeholder="Enter passcode"
                 autoFocus
-                className="w-full rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-3 text-white placeholder-slate-500 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                className="w-full rounded-xl border border-red-900/50 bg-red-950/30 px-4 py-3 text-white placeholder-red-400/50 outline-none transition focus:border-red-500 focus:ring-2 focus:ring-red-500/30"
               />
               {authError && (
                 <p className="mt-2 text-sm text-red-400">Incorrect passcode. Please try again.</p>
@@ -128,7 +128,7 @@ export default function App() {
             <button
               type="submit"
               disabled={authLoading || !passcode}
-              className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 px-4 py-3 font-semibold text-white shadow-lg shadow-emerald-500/20 transition hover:from-emerald-400 hover:to-teal-500 disabled:cursor-not-allowed disabled:opacity-50"
+              className="w-full rounded-xl bg-gradient-to-r from-red-600 to-rose-700 px-4 py-3 font-semibold text-white shadow-lg shadow-red-600/30 transition hover:from-red-500 hover:to-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {authLoading ? "Verifying..." : "Unlock"}
             </button>

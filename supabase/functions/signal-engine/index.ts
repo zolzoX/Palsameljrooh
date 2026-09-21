@@ -1118,14 +1118,17 @@ Deno.serve(async (req: Request) => {
     for (const sig of inserted ?? []) {
       const original = signalsToSend.find((s) => s.title === sig.title);
       const isVipSignal = (original as Record<string, unknown> | undefined)?.is_vip === true;
-      // Only VIP signals are sent to Telegram channels; free signals are not posted
-      if (!isVipSignal) {
+      // Non-scalping signals (whale, meme, news) are always posted; free scalping signals are skipped
+      const isNonScalping = sig.engine_slug === "whale" || sig.engine_slug === "meme" || sig.engine_slug === "news";
+      if (!isVipSignal && !isNonScalping) {
         await supabase.from("signals").update({ status: "sent" }).eq("id", sig.id);
         continue;
       }
       const allowedBotIds = routes.filter((r) => r.engine_slug === sig.engine_slug).map((r) => r.bot_id);
       const targetBots = bots.filter((b) => {
         if (!allowedBotIds.includes(b.id)) return false;
+        // Non-scalping signals go to all routed bots (free + VIP); scalping VIP only to non-free
+        if (isNonScalping) return true;
         const botChannelType = (b as Record<string, unknown>).channel_type as string | undefined;
         return botChannelType !== "free";
       });

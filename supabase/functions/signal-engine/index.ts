@@ -642,15 +642,23 @@ Deno.serve(async (req: Request) => {
       { asset: "NOT", binance: "NOTUSDT" },
       { asset: "DYDX", binance: "DYDXUSDT" },
     ];
-    let whaleBtcPrice = 80000;
+    let whaleBtcPrice = 0;
+    let whaleBtcAvailable = false;
     try {
       const wBtcResp = await fetch("https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT", { signal: AbortSignal.timeout(5000) });
-      if (wBtcResp.ok) { const wBtcData = await wBtcResp.json() as { price: string }; whaleBtcPrice = parseFloat(wBtcData.price); }
-    } catch { /* fallback */ }
+      if (wBtcResp.ok) { const wBtcData = await wBtcResp.json() as { price: string }; whaleBtcPrice = parseFloat(wBtcData.price); whaleBtcAvailable = whaleBtcPrice > 0; }
+    } catch (err) {
+      await supabase.from("system_logs").insert({ level: "error", engine_slug: "whale", message: `BTC price fetch failed for whale thresholds: ${err instanceof Error ? err.message : "unknown"}` });
+    }
+    if (!whaleBtcAvailable) {
+      await supabase.from("system_logs").insert({ level: "warning", engine_slug: "whale", message: "BTC price unavailable — skipping whale detection this cycle (stale price would create incorrect thresholds)" });
+      log.push("Whale detection skipped: BTC price unavailable");
+    }
     const whaleAggThreshold = 10 * whaleBtcPrice;
     const whaleSingleThreshold = 1 * whaleBtcPrice;
 
-    // Process whale pairs in parallel batches of 10
+    // Process whale pairs in parallel batches of 10 (skip if BTC price unavailable)
+    if (whaleBtcAvailable) {
     for (let wBatchStart = 0; wBatchStart < whalePairs.length; wBatchStart += 10) {
       const wBatch = whalePairs.slice(wBatchStart, wBatchStart + 10);
       const wResults = await Promise.allSettled(wBatch.map(async (wp) => {
@@ -713,6 +721,7 @@ Deno.serve(async (req: Request) => {
         if (wr.status === "fulfilled") newSignals.push(...wr.value);
       }
     }
+    } // end if (whaleBtcAvailable)
 
     // 7. Run meme radar and generate meme signals
     try {
@@ -1118,32 +1127,37 @@ Deno.serve(async (req: Request) => {
     for (const sig of inserted ?? []) {
       const original = signalsToSend.find((s) => s.title === sig.title);
       const isVipSignal = (original as Record<string, unknown> | undefined)?.is_vip === true;
-      // Non-scalping signals (whale, meme, news) are always posted; free scalping signals are skipped
       const isNonScalping = sig.engine_slug === "whale" || sig.engine_slug === "meme" || sig.engine_slug === "news";
-      if (!isVipSignal && !isNonScalping) {
-        await supabase.from("signals").update({ status: "sent" }).eq("id", sig.id);
-        continue;
-      }
+
+      // Determine target bots based on engine type and VIP status
       const allowedBotIds = routes.filter((r) => r.engine_slug === sig.engine_slug).map((r) => r.bot_id);
       const targetBots = bots.filter((b) => {
         if (!allowedBotIds.includes(b.id)) return false;
-        // Non-scalping signals go to all routed bots (free + VIP); scalping VIP only to non-free
-        if (isNonScalping) return true;
         const botChannelType = (b as Record<string, unknown>).channel_type as string | undefined;
-        return botChannelType !== "free";
+        // Whale → FREE channel only (not VIP)
+        if (sig.engine_slug === "whale") return botChannelType === "free";
+        // VIP scalping → VIP channel only
+        if (sig.engine_slug === "scalping" && isVipSignal) return botChannelType !== "free";
+        // Free scalping → FREE channel only
+        if (sig.engine_slug === "scalping" && !isVipSignal) return botChannelType === "free";
+        // Meme and News → both channels for now (counter-based routing added in Phase 3)
+        return true;
       });
 
       if (targetBots.length === 0) {
-        await supabase.from("signals").update({ status: "sent" }).eq("id", sig.id);
+        await supabase.from("signals").update({ status: "skipped" }).eq("id", sig.id);
         continue;
       }
 
-      // Fetch VIP settings (for counter, if needed later)
-      const { data: vipSettingsData } = await supabase.from("vip_settings").select("free_signal_counter, id").limit(1).maybeSingle();
-      const vipSettings = (vipSettingsData ?? {}) as { free_signal_counter?: number; id?: string };
-
-      // No locking needed — VIP and free signals are already routed to separate channels
-      const shouldLockForFree = false;
+      // Create delivery records for each target bot
+      const deliveryRows = targetBots.map((b) => ({
+        signal_id: sig.id,
+        bot_id: b.id,
+        channel_type: ((b as Record<string, unknown>).channel_type as string) ?? "vip",
+        channel_id: b.chat_id,
+        status: "pending",
+      }));
+      await supabase.from("signal_deliveries").insert(deliveryRows);
 
       // Helper: resolve the subscribe URL for a free channel bot (from its linked VIP bot)
       async function resolveSubscribeUrl(freeBot: Record<string, unknown>): Promise<string> {
@@ -1293,58 +1307,94 @@ Deno.serve(async (req: Request) => {
         } else {
           keyboard = buildVipKeyboard();
         }
-        try {
-          const tgUrl = `https://api.telegram.org/bot${bot.bot_token}/sendPhoto`;
-          const tgResp = await fetch(tgUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id: bot.chat_id,
-              photo: chartUrl,
-              caption: caption,
-              parse_mode: "HTML",
-              reply_markup: keyboard,
-            }),
-            signal: AbortSignal.timeout(15000),
-          });
-          const tgData = await tgResp.json();
 
-          if (tgResp.ok && tgData.ok) {
-            sentCount++;
-            await supabase.from("signals").update({ status: "sent", bot_id: bot.id }).eq("id", sig.id);
-          } else {
-            // Fallback: sendMessage without image
-            const fallbackResp = await fetch(`https://api.telegram.org/bot${bot.bot_token}/sendMessage`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ chat_id: bot.chat_id, text: caption, parse_mode: "HTML", reply_markup: keyboard, disable_web_page_preview: true }),
-              signal: AbortSignal.timeout(10000),
-            });
-            const fallbackData = await fallbackResp.json();
-            if (fallbackResp.ok && fallbackData.ok) {
-              sentCount++;
-              await supabase.from("signals").update({ status: "sent", bot_id: bot.id }).eq("id", sig.id);
-            } else {
-              failedCount++;
-              await supabase.from("signals").update({ status: "failed", bot_id: bot.id }).eq("id", sig.id);
-            }
-          }
-        } catch {
+        // Retry logic: up to 3 attempts with backoff
+        const maxAttempts = 3;
+        const backoffMs = [0, 2000, 5000];
+        let deliverySuccess = false;
+        let telegramMessageId: string | null = null;
+        let lastError = "";
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          if (attempt > 1) await new Promise((r) => setTimeout(r, backoffMs[attempt - 1] ?? 5000));
+
           try {
-            await fetch(`https://api.telegram.org/bot${bot.bot_token}/sendMessage`, {
+            const tgUrl = `https://api.telegram.org/bot${bot.bot_token}/sendPhoto`;
+            const tgResp = await fetch(tgUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: bot.chat_id,
+                photo: chartUrl,
+                caption: caption,
+                parse_mode: "HTML",
+                reply_markup: keyboard,
+              }),
+              signal: AbortSignal.timeout(15000),
+            });
+            const tgData = await tgResp.json();
+
+            if (tgResp.ok && tgData.ok) {
+              deliverySuccess = true;
+              telegramMessageId = tgData.result?.message_id != null ? String(tgData.result.message_id) : null;
+              break;
+            }
+
+            lastError = `sendPhoto: ${tgData.description ?? tgResp.statusText ?? "unknown"}`;
+
+            // Fallback: sendMessage without image
+            const fbResp = await fetch(`https://api.telegram.org/bot${bot.bot_token}/sendMessage`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ chat_id: bot.chat_id, text: caption, parse_mode: "HTML", reply_markup: keyboard, disable_web_page_preview: true }),
               signal: AbortSignal.timeout(10000),
             });
-            sentCount++;
-            await supabase.from("signals").update({ status: "sent", bot_id: bot.id }).eq("id", sig.id);
-          } catch {
-            failedCount++;
-            await supabase.from("signals").update({ status: "failed", bot_id: bot.id }).eq("id", sig.id);
+            const fbData = await fbResp.json();
+            if (fbResp.ok && fbData.ok) {
+              deliverySuccess = true;
+              telegramMessageId = fbData.result?.message_id != null ? String(fbData.result.message_id) : null;
+              break;
+            }
+            lastError = `sendMessage: ${fbData.description ?? fbResp.statusText ?? "unknown"}`;
+          } catch (err) {
+            lastError = err instanceof Error ? err.message : "fetch failed";
           }
         }
+
+        // Update the delivery record
+        const deliveryUpdate: Record<string, unknown> = {
+          attempts: maxAttempts,
+          last_attempt_at: new Date().toISOString(),
+          error_message: deliverySuccess ? null : lastError,
+        };
+        if (deliverySuccess) {
+          deliveryUpdate.status = "sent";
+          deliveryUpdate.telegram_message_id = telegramMessageId;
+          deliveryUpdate.delivered_at = new Date().toISOString();
+          sentCount++;
+        } else {
+          deliveryUpdate.status = "failed";
+          failedCount++;
+          await supabase.from("system_logs").insert({
+            level: "error",
+            engine_slug: sig.engine_slug,
+            message: `Telegram delivery failed: signal="${sig.title}" bot="${bot.name}" channel_id="${bot.chat_id}" attempts=${maxAttempts} error="${lastError}"`,
+          });
+        }
+        await supabase.from("signal_deliveries")
+          .update(deliveryUpdate)
+          .eq("signal_id", sig.id)
+          .eq("bot_id", bot.id);
       }
+
+      // Update signal status based on delivery results
+      const { data: delivStatus } = await supabase.from("signal_deliveries")
+        .select("status").eq("signal_id", sig.id);
+      const allDeliveries = (delivStatus ?? []) as Array<{ status: string }>;
+      const anySent = allDeliveries.some((d) => d.status === "sent");
+      const allFailed = allDeliveries.length > 0 && allDeliveries.every((d) => d.status === "failed");
+      const newStatus = anySent ? "sent" : allFailed ? "failed" : "skipped";
+      await supabase.from("signals").update({ status: newStatus }).eq("id", sig.id);
     }
 
     // 10. Send market summary digest (brief overview, no signal details)

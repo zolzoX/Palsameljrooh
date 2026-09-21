@@ -251,125 +251,17 @@ Deno.serve(async (req: Request) => {
     // Insert only new articles (preserves existing ones)
     if (newArticles.length > 0) await supabase.from("news_items").insert(newArticles);
 
-    // Send high-impact news to Telegram bots
-    let sentCount = 0;
-    if (newArticles.length > 0) {
-      const { data: botData } = await supabase.from("telegram_bots").select("*").eq("is_active", true).eq("is_connected", true);
-      const { data: routeData } = await supabase.from("bot_engine_routes").select("*").eq("is_allowed", true).eq("engine_slug", "news");
-      const bots = (botData ?? []) as Array<{ id: string; bot_token: string; chat_id: string; name: string }>;
-      const routes = (routeData ?? []) as Array<{ bot_id: string }>;
-      const allowedBotIds = new Set(routes.map((r) => r.bot_id));
-      const targetBots = bots.filter((b) => allowedBotIds.has(b.id));
-
-      const { data: referralLinks } = await supabase.from("referral_links").select("*").eq("is_active", true);
-      const links = (referralLinks ?? []) as Array<{ exchange_name: string; referral_url: string }>;
-
-      const topNews = newArticles.slice(0, 8);
-
-      // Fetch BTC klines once for all news charts
-      let btcCloses: number[] = [];
-      try {
-        const btcResp = await fetch("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=30", { signal: AbortSignal.timeout(8000) });
-        if (btcResp.ok) {
-          const btcData = await btcResp.json() as Array<Array<string | number>>;
-          btcCloses = btcData.map((k) => Number(k[4]));
-        }
-      } catch { /* skip */ }
-
-      for (const bot of targetBots) {
-        for (const article of topNews) {
-          try {
-            const sentimentIcon = article.sentiment === "bullish" ? "\u{1F7E2}" : article.sentiment === "bearish" ? "\u{1F534}" : "\u{26AA}";
-            const sentimentText = article.sentiment === "bullish" ? "BULLISH" : article.sentiment === "bearish" ? "BEARISH" : "NEUTRAL";
-            let caption = `<b>NEWS</b>\n${sentimentIcon} <b>${sentimentText}</b> | ${article.source}\n`;
-            caption += `${article.title}\n`;
-            if (article.keywords.length > 0) caption += article.keywords.slice(0, 4).map((k) => `#${k}`).join(" ") + "\n";
-            caption += `\nSource: ${article.source} - ${article.url || "N/A"}`;
-
-            const referralRows: Array<Array<{ text: string; url: string }>> = links.map((l) => [{ text: l.exchange_name, url: l.referral_url }]);
-            const keyboard = {
-              inline_keyboard: [
-                [{ text: "Read Full Article", url: article.url || "https://cointelegraph.com" }],
-                ...referralRows,
-              ],
-            };
-
-            // Build a real BTC price chart with sentiment overlay
-            const isBull = article.sentiment === "bullish";
-            const lineColor = isBull ? "rgba(34,197,94,1)" : article.sentiment === "bearish" ? "rgba(239,68,68,1)" : "rgba(34,211,238,1)";
-            const fillColor = isBull ? "rgba(34,197,94,0.12)" : article.sentiment === "bearish" ? "rgba(239,68,68,0.12)" : "rgba(34,211,238,0.12)";
-            const chartCloses = btcCloses.length >= 5 ? btcCloses : [100, 102, 99, 105, 103, 108, 110];
-            const newsChartConfig = {
-              type: "line",
-              data: {
-                labels: chartCloses.map((_, i) => i),
-                datasets: [{
-                  label: "BTC/USDT",
-                  data: chartCloses,
-                  borderColor: lineColor,
-                  backgroundColor: fillColor,
-                  fill: true,
-                  tension: 0.4,
-                  pointRadius: 0,
-                  borderWidth: 2,
-                }],
-              },
-              options: {
-                plugins: {
-                  legend: { display: false },
-                  title: { display: true, text: [`NEWS — ${article.source}`, `${sentimentText} SENTIMENT`], color: "#ffffff", font: { size: 14 } },
-                },
-                scales: {
-                  x: { display: false },
-                  y: { grid: { color: "rgba(30,41,59,0.4)" }, ticks: { color: "#64748b", font: { size: 9 } } },
-                },
-              },
-            };
-            const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(newsChartConfig))}&v=3&w=600&h=400&bkg=rgb(15,23,42)`;
-
-            const finalCaption = caption.length > 1024 ? caption.slice(0, 1020) + "..." : caption;
-
-            const tgResp = await fetch(`https://api.telegram.org/bot${bot.bot_token}/sendPhoto`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                chat_id: bot.chat_id,
-                photo: chartUrl,
-                caption: finalCaption,
-                parse_mode: "HTML",
-                reply_markup: keyboard,
-              }),
-              signal: AbortSignal.timeout(15000),
-            });
-            const tgData = await tgResp.json();
-            if (tgResp.ok && tgData.ok) {
-              sentCount++;
-            } else {
-              const fbResp = await fetch(`https://api.telegram.org/bot${bot.bot_token}/sendMessage`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ chat_id: bot.chat_id, text: finalCaption, parse_mode: "HTML", reply_markup: keyboard, disable_web_page_preview: true }),
-                signal: AbortSignal.timeout(10000),
-              });
-              const fbData = await fbResp.json();
-              if (fbResp.ok && fbData.ok) sentCount++;
-            }
-          } catch { /* skip */ }
-        }
-      }
-    }
-
     const bullCount = analyzed.filter((a) => a.sentiment === "bullish").length;
     const bearCount = analyzed.filter((a) => a.sentiment === "bearish").length;
     const neutralCount = analyzed.filter((a) => a.sentiment === "neutral").length;
 
     await supabase.from("system_logs").insert({
       level: "success", engine_slug: "news",
-      message: `News refreshed — ${analyzed.length} articles from ${fetchedSources.join(", ")} | New: ${newArticles.length} | Sent: ${sentCount} | Bull: ${bullCount} Bear: ${bearCount} Neutral: ${neutralCount}${feedErrors.length > 0 ? ` | Failed feeds: ${feedErrors.length}` : ""}`,
+      message: `News refreshed — ${analyzed.length} articles from ${fetchedSources.join(", ")} | New: ${newArticles.length} | Bull: ${bullCount} Bear: ${bearCount} Neutral: ${neutralCount}${feedErrors.length > 0 ? ` | Failed feeds: ${feedErrors.length}` : ""}`,
     });
 
     return new Response(JSON.stringify({
-      count: analyzed.length, new: newArticles.length, sent: sentCount,
+      count: analyzed.length, new: newArticles.length, sent: 0,
       sources: fetchedSources, errors: feedErrors,
       bullish: bullCount, bearish: bearCount, neutral: neutralCount,
       items: analyzed,
